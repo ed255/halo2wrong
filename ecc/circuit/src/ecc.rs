@@ -71,6 +71,11 @@ impl<W: WrongExt, N: FieldExt> AssignedPoint<W, N> {
     pub fn get_x(&self) -> AssignedInteger<W, N> {
         self.x.clone()
     }
+
+    /// Returns $y$ coordinate
+    pub fn get_y(&self) -> AssignedInteger<W, N> {
+        self.y.clone()
+    }
 }
 
 mod base_field_ecc;

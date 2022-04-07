@@ -8,7 +8,7 @@ use halo2::arithmetic::{CurveAffine, FieldExt};
 use halo2::plonk::Error;
 use integer::rns::Integer;
 use integer::{AssignedInteger, IntegerInstructions};
-use maingate::{MainGateConfig, RangeConfig};
+use maingate::{AssignedCondition, MainGateConfig, RangeConfig};
 
 use super::integer::{IntegerChip, IntegerConfig};
 
@@ -73,7 +73,7 @@ impl<E: CurveAffine, N: FieldExt> EcdsaChip<E, N> {
         sig: &AssignedEcdsaSig<E::Scalar, N>,
         pk: &AssignedPublicKey<E::Base, N>,
         msg_hash: &AssignedInteger<E::Scalar, N>,
-    ) -> Result<(), Error> {
+    ) -> Result<AssignedCondition<N>, Error> {
         let ecc_chip = self.ecc_chip();
         let scalar_chip = ecc_chip.scalar_field_chip();
         let base_chip = ecc_chip.base_field_chip();
@@ -105,10 +105,10 @@ impl<E: CurveAffine, N: FieldExt> EcdsaChip<E, N> {
         let q_x_reduced_in_q = base_chip.reduce(ctx, &q_x)?;
         let q_x_reduced_in_r = scalar_chip.reduce_external(ctx, &q_x_reduced_in_q)?;
 
-        // 7. check if Q.x == r (mod n)
-        scalar_chip.assert_strict_equal(ctx, &q_x_reduced_in_r, &sig.r)?;
+        // 7. return Q.x == r (mod n)
+        let res = scalar_chip.is_strict_equal(ctx, &q_x_reduced_in_r, &sig.r)?;
 
-        Ok(())
+        Ok(res)
     }
 }
 
@@ -128,7 +128,9 @@ mod tests {
     use halo2::dev::MockProver;
     use halo2::plonk::{Circuit, ConstraintSystem, Error};
     use integer::{IntegerInstructions, NUMBER_OF_LOOKUP_LIMBS};
-    use maingate::{MainGate, MainGateConfig, RangeChip, RangeConfig, RangeInstructions};
+    use maingate::{
+        MainGate, MainGateConfig, MainGateInstructions, RangeChip, RangeConfig, RangeInstructions,
+    };
 
     use rand::thread_rng;
     use std::marker::PhantomData;
@@ -139,7 +141,7 @@ mod tests {
     #[cfg(feature = "kzg")]
     use crate::halo2::arithmetic::BaseExt;
 
-    const BIT_LEN_LIMB: usize = 68;
+    const BIT_LEN_LIMB: usize = 72;
 
     #[derive(Clone, Debug)]
     struct TestCircuitEcdsaVerifyConfig {
@@ -203,6 +205,7 @@ mod tests {
             config: Self::Config,
             mut layouter: impl Layouter<N>,
         ) -> Result<(), Error> {
+            let main_gate = MainGate::new(config.main_gate_config.clone());
             let mut ecc_chip = GeneralEccChip::<E, N>::new(config.ecc_chip_config(), BIT_LEN_LIMB);
             let scalar_chip = ecc_chip.scalar_field_chip();
 
@@ -235,6 +238,7 @@ mod tests {
 
             let x_bytes_on_n = <E as CurveAffine>::ScalarExt::from_bytes_wide(&x_bytes); // get x cordinate (E::Base) on E::Scalar
             let sig_s = randomness_inv * (m_hash + x_bytes_on_n * sk);
+            println!("DBG sig_s: {:#?}", sig_s);
 
             layouter.assign_region(
                 || "assign aux values",
@@ -258,6 +262,7 @@ mod tests {
 
                     let integer_r = ecc_chip.new_unassigned_scalar(Some(x_bytes_on_n));
                     let integer_s = ecc_chip.new_unassigned_scalar(Some(sig_s));
+                    println!("DBG integer_s: {:#?}", integer_s);
                     let msg_hash = ecc_chip.new_unassigned_scalar(Some(m_hash));
 
                     let r_assigned = scalar_chip.assign_integer(ctx, integer_r)?;
@@ -272,7 +277,8 @@ mod tests {
                         point: pk_in_circuit,
                     };
                     let msg_hash = scalar_chip.assign_integer(ctx, msg_hash)?;
-                    ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)
+                    let result = ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
+                    main_gate.assert_one(ctx, result)
                 },
             )?;
 

@@ -181,6 +181,12 @@ pub trait IntegerInstructions<W: WrongExt, N: FieldExt> {
         a: &AssignedInteger<W, N>,
         b: &AssignedInteger<W, N>,
     ) -> Result<(), Error>;
+    fn is_strict_equal(
+        &self,
+        ctx: &mut RegionCtx<'_, '_, N>,
+        a: &AssignedInteger<W, N>,
+        b: &AssignedInteger<W, N>,
+    ) -> Result<AssignedCondition<N>, Error>;
     fn assert_not_equal(
         &self,
         ctx: &mut RegionCtx<'_, '_, N>,
@@ -508,6 +514,21 @@ impl<W: WrongExt, N: FieldExt> IntegerInstructions<W, N> for IntegerChip<W, N> {
             main_gate.assert_equal(ctx, a.limb(idx), b.limb(idx))?;
         }
         Ok(())
+    }
+
+    fn is_strict_equal(
+        &self,
+        ctx: &mut RegionCtx<'_, '_, N>,
+        a: &AssignedInteger<W, N>,
+        b: &AssignedInteger<W, N>,
+    ) -> Result<AssignedCondition<N>, Error> {
+        let main_gate = self.main_gate();
+        let mut cond = main_gate.is_equal(ctx, a.limb(0), b.limb(0))?;
+        for idx in 1..NUMBER_OF_LIMBS {
+            let res = main_gate.is_equal(ctx, a.limb(idx), b.limb(idx))?;
+            cond = main_gate.and(ctx, &cond, &res)?;
+        }
+        Ok(cond)
     }
 
     fn assert_not_equal(
