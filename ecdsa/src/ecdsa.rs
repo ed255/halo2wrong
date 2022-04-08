@@ -73,7 +73,7 @@ impl<E: CurveAffine, N: FieldExt> EcdsaChip<E, N> {
         sig: &AssignedEcdsaSig<E::Scalar, N>,
         pk: &AssignedPublicKey<E::Base, N>,
         msg_hash: &AssignedInteger<E::Scalar, N>,
-    ) -> Result<AssignedCondition<N>, Error> {
+    ) -> Result<(), Error> {
         let ecc_chip = self.ecc_chip();
         let scalar_chip = ecc_chip.scalar_field_chip();
         let base_chip = ecc_chip.base_field_chip();
@@ -105,10 +105,10 @@ impl<E: CurveAffine, N: FieldExt> EcdsaChip<E, N> {
         let q_x_reduced_in_q = base_chip.reduce(ctx, &q_x)?;
         let q_x_reduced_in_r = scalar_chip.reduce_external(ctx, &q_x_reduced_in_q)?;
 
-        // 7. return Q.x == r (mod n)
-        let res = scalar_chip.is_strict_equal(ctx, &q_x_reduced_in_r, &sig.r)?;
+        // 7. check Q.x == r (mod n)
+        scalar_chip.assert_strict_equal(ctx, &q_x_reduced_in_r, &sig.r)?;
 
-        Ok(res)
+        Ok(())
     }
 }
 
@@ -205,7 +205,6 @@ mod tests {
             config: Self::Config,
             mut layouter: impl Layouter<N>,
         ) -> Result<(), Error> {
-            let main_gate = MainGate::new(config.main_gate_config.clone());
             let mut ecc_chip = GeneralEccChip::<E, N>::new(config.ecc_chip_config(), BIT_LEN_LIMB);
             let scalar_chip = ecc_chip.scalar_field_chip();
 
@@ -216,8 +215,10 @@ mod tests {
             let sk = <E as CurveAffine>::ScalarExt::random(&mut rng);
             let pk = generator * sk;
             let pk = pk.to_affine();
+            // let pk = generator; // DBG
 
             let m_hash = <E as CurveAffine>::ScalarExt::random(&mut rng);
+            // let m_hash = <E as CurveAffine>::ScalarExt::one(); // DBG
             let randomness = <E as CurveAffine>::ScalarExt::random(&mut rng);
             let randomness_inv = randomness.invert().unwrap();
             let sig_point = generator * randomness;
@@ -238,6 +239,7 @@ mod tests {
 
             let x_bytes_on_n = <E as CurveAffine>::ScalarExt::from_bytes_wide(&x_bytes); // get x cordinate (E::Base) on E::Scalar
             let sig_s = randomness_inv * (m_hash + x_bytes_on_n * sk);
+            println!("DBG sig_r: {:#?}", x_bytes_on_n);
             println!("DBG sig_s: {:#?}", sig_s);
 
             layouter.assign_region(
@@ -260,6 +262,11 @@ mod tests {
                     let offset = &mut 0;
                     let ctx = &mut RegionCtx::new(&mut region, offset);
 
+                    // DBG
+                    // let integer_r =
+                    //     ecc_chip.new_unassigned_scalar(Some(<E as CurveAffine>::ScalarExt::one()));
+                    // let integer_s =
+                    //     ecc_chip.new_unassigned_scalar(Some(<E as CurveAffine>::ScalarExt::one()));
                     let integer_r = ecc_chip.new_unassigned_scalar(Some(x_bytes_on_n));
                     let integer_s = ecc_chip.new_unassigned_scalar(Some(sig_s));
                     println!("DBG integer_s: {:#?}", integer_s);
@@ -277,8 +284,7 @@ mod tests {
                         point: pk_in_circuit,
                     };
                     let msg_hash = scalar_chip.assign_integer(ctx, msg_hash)?;
-                    let result = ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
-                    main_gate.assert_one(ctx, result)
+                    ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)
                 },
             )?;
 
