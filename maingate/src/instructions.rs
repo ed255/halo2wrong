@@ -820,6 +820,62 @@ pub trait MainGateInstructions<F: FieldExt, const WIDTH: usize>: Chip<F> {
     }
 
     /// Assigns a new witness `r` as:
+    /// `r = a * constant`
+    fn mul_constant(
+        &self,
+        ctx: &mut RegionCtx<'_, '_, F>,
+        a: &AssignedValue<F>,
+        constant: F,
+    ) -> Result<AssignedValue<F>, Error> {
+        let c = match a.value() {
+            Some(a) => Some(a * constant),
+            _ => None,
+        };
+
+        Ok(self.combine(
+            ctx,
+            terms!([Term::Assigned(*a, constant), Term::unassigned_to_sub(c)]),
+            F::zero(),
+            CombinationOptionCommon::OneLinerAdd.into(),
+        )?[1])
+    }
+
+    /// Assigns a new witness `r` as:
+    /// `r = a * constant_a + b * constant_b + c * constant_c + d * constant_d`
+    fn mul4_constant(
+        &self,
+        ctx: &mut RegionCtx<'_, '_, F>,
+        a_constant: (&AssignedValue<F>, F),
+        b_constant: (&AssignedValue<F>, F),
+        c_constant: (&AssignedValue<F>, F),
+        d_constant: (&AssignedValue<F>, F),
+    ) -> Result<AssignedValue<F>, Error> {
+        let (a, a_constant) = a_constant;
+        let (b, b_constant) = b_constant;
+        let (c, c_constant) = c_constant;
+        let (d, d_constant) = d_constant;
+        let e = match (a.value(), b.value(), c.value(), d.value()) {
+            (Some(a), Some(b), Some(c), Some(d)) => {
+                Some(a * a_constant + b * b_constant + c * c_constant + d * d_constant)
+            }
+            _ => None,
+        };
+
+        Ok(self.combine(
+            ctx,
+            terms!([
+                Term::Assigned(*a, a_constant),
+                Term::Assigned(*b, b_constant),
+                Term::Assigned(*c, c_constant),
+                Term::Assigned(*d, d_constant),
+                Term::unassigned_to_sub(e)
+            ]),
+            F::zero(),
+            CombinationOptionCommon::OneLinerAdd.into(),
+        )?[4])
+    }
+
+    /// Assigns a new witness `r` as:
     /// `r = a * b + to_add`
     fn mul_add(
         &self,

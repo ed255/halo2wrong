@@ -1186,6 +1186,42 @@ mod tests {
                     main_gate.assert_equal(ctx, &c_0, &c_1)?;
 
                     let a = rand();
+                    let constant = rand();
+                    let c = a * constant;
+                    let a = Some(a);
+                    let c = Some(c);
+
+                    let a = main_gate.assign_value(ctx, &a.into())?;
+                    let c_0 = main_gate.assign_value(ctx, &c.into())?;
+                    let c_1 = main_gate.mul_constant(ctx, &a, constant)?;
+                    main_gate.assert_equal(ctx, &c_0, &c_1)?;
+
+                    let (a, a_constant) = (rand(), rand());
+                    let (b, b_constant) = (rand(), rand());
+                    let (c, c_constant) = (rand(), rand());
+                    let (d, d_constant) = (rand(), rand());
+                    let e = a * a_constant + b * b_constant + c * c_constant + d * d_constant;
+                    let a = Some(a);
+                    let b = Some(b);
+                    let c = Some(c);
+                    let d = Some(d);
+                    let e = Some(e);
+
+                    let a = main_gate.assign_value(ctx, &a.into())?;
+                    let b = main_gate.assign_value(ctx, &b.into())?;
+                    let c = main_gate.assign_value(ctx, &c.into())?;
+                    let d = main_gate.assign_value(ctx, &d.into())?;
+                    let e_0 = main_gate.assign_value(ctx, &e.into())?;
+                    let e_1 = main_gate.mul4_constant(
+                        ctx,
+                        (&a, a_constant),
+                        (&b, b_constant),
+                        (&c, c_constant),
+                        (&d, d_constant),
+                    )?;
+                    main_gate.assert_equal(ctx, &e_0, &e_1)?;
+
+                    let a = rand();
                     let b = rand();
                     let c = a * b.invert().unwrap();
                     let a = Some(a);
