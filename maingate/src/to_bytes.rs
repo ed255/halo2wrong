@@ -40,14 +40,12 @@ impl<F: FieldExt> ToBytesChip<F> {
         todo!();
     }
 
-    fn base<const NUM_BYTES: usize>() -> [F; NUM_BYTES] {
-        assert!(NUM_BYTES > 0);
-        assert!(NUM_BYTES < 32);
-        let mut base = [F::from(0); NUM_BYTES];
-        for (i, b) in base.iter_mut().enumerate() {
-            *b = F::from(256).pow(&[i as u64, 0, 0, 0]);
-        }
-        base
+    fn base(byte_len: usize) -> Vec<F> {
+        assert!(byte_len > 0);
+        assert!(byte_len < 32);
+        (0..byte_len)
+            .map(|i| F::from(256).pow(&[i as u64, 0, 0, 0]))
+            .collect()
     }
 
     fn main_gate_config(&self) -> MainGateConfig {
@@ -83,35 +81,37 @@ impl<F: FieldExt> Chip<F> for ToBytesChip<F> {
 }
 
 pub trait ToBytesInstructions<F: FieldExt>: Chip<F> {
-    fn to_bytes<const NUM_BYTES: usize>(
+    fn to_bytes(
         &self,
         ctx: &mut RegionCtx<'_, '_, F>,
         input: &AssignedValue<F>,
-    ) -> Result<[AssignedValue<F>; NUM_BYTES], Error>;
+        byte_len: usize,
+    ) -> Result<Vec<AssignedValue<F>>, Error>;
 
     fn load_byte_range_table(&self, layouter: &mut impl Layouter<F>) -> Result<(), Error>;
 }
 
 impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
-    fn to_bytes<const NUM_BYTES: usize>(
+    fn to_bytes(
         &self,
         ctx: &mut RegionCtx<'_, '_, F>,
         input: &AssignedValue<F>,
-    ) -> Result<[AssignedValue<F>; NUM_BYTES], Error> {
+        byte_len: usize,
+    ) -> Result<Vec<AssignedValue<F>>, Error> {
         let main_gate = self.main_gate();
         let (one, zero) = (F::one(), F::zero());
-        let base = Self::base::<NUM_BYTES>();
+        let base = Self::base(byte_len);
 
         let bytes: Option<Vec<F>> = input
             .value
             .map(|v| {
                 let value_repr = v.to_repr();
                 let bytes32 = value_repr.as_ref();
-                if bytes32[NUM_BYTES..].iter().any(|&b| b != 0) {
-                    // `input` doesn't fit in `NUM_BYTES`
+                if bytes32[byte_len..].iter().any(|&b| b != 0) {
+                    // `input` doesn't fit in `byte_len`
                     return Err(Error::Synthesis);
                 }
-                Ok(bytes32[..NUM_BYTES]
+                Ok(bytes32[..byte_len]
                     .iter()
                     .map(|b| F::from(*b as u64))
                     .collect())
@@ -120,7 +120,7 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
 
         let mut bytes_assigned = Vec::new();
 
-        // A. When NUM_BYTES is between 1 and 3
+        // A. When byte_len is between 1 and 3
         //
         // in = B^0 * b0 + B^1 * b1 + B^2 * b2
         //
@@ -128,21 +128,11 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
         // | ---      | ---      | ---      | ---     | ---      | ---    |
         // | B^0 * b0 | B^1 * b1 | B^2 * b2 | -1 * in | -        | -      |
 
-        // B. When NUM_BYTES is between 4 and 7
+        // B. When byte_len is between 4 and 31
         //
-        // acc0 = B^0 * b0 + B^1 * b1 + B^2 * b2 + B^3 * b3
-        // in   = B^4 * b4 + B^5 * b5 + B^6 * b6 + acc0
-        //
-        // | A        | B        | C        | D        | E        | E_next    |
-        // | ---      | ---      | ---      | ---      | ---      | ---       |
-        // | B^0 * b0 | B^1 * b1 | B^2 * b2 | B^3 * b3 | -        | -1 * acc0 |
-        // | B^4 * b4 | B^5 * b5 | B^6 * b6 | -1 * in  | 1 * acc0 | -         |
-
-        // B. When NUM_BYTES is between 8 and 11
-        //
-        // acc0 = B^0 * b0 + B^1 * b1 + B^2 * b2 + B^3 * b3
-        // acc1 = B^4 * b4 + B^5 * b5 + B^6 * b6 + B^7 * b7 + acc0
-        // in   = B^8 * b8 + B^9 * b9 + B^10 * b10 + acc1
+        // acc0 = B^0 * b0 + B^1 * b1 + B^2 * b2 + B^3 * b3        (First row)
+        // acc1 = B^4 * b4 + B^5 * b5 + B^6 * b6 + B^7 * b7 + acc0 (Intermediate row)
+        // in   = B^8 * b8 + B^9 * b9 + B^10 * b10 + acc1          (Last row)
         //
         // | A        | B        | C          | D        | E        | E_next    |
         // | ---      | ---      | ---        | ---      | ---      | ---       |
@@ -150,7 +140,7 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
         // | B^4 * b4 | B^5 * b5 | B^6 * b6   | B^7 * b7 | 1 * acc0 | -1 * acc1 |
         // | B^8 * b8 | B^9 * b9 | B^10 * b10 | -1 * in  | 1 * acc1 | -         |
 
-        let byte_terms: Vec<Term<F>> = (0..NUM_BYTES)
+        let byte_terms: Vec<Term<F>> = (0..byte_len)
             .map(|i| Term::Unassigned(bytes.as_ref().map(|bytes| bytes[i]), base[i]))
             .collect();
         if byte_terms.len() <= 3 {
@@ -167,7 +157,7 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
                 zero,
                 CombinationOptionCommon::OneLinerAdd.into(),
             )?;
-            bytes_assigned.extend_from_slice(&assigned[..3]);
+            bytes_assigned.extend_from_slice(&assigned[..byte_len]);
         } else {
             // B. Multiple row case
             let mut index = 0;
@@ -193,7 +183,7 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
 
             // Intermediate rows
             // acc1 = B^4 * b4 + B^5 * b5 + B^6 * b6 + B^7 * b7 + acc0
-            while index + 3 <= NUM_BYTES {
+            while index + 3 <= byte_len {
                 let assigned = main_gate.combine(
                     ctx,
                     &[
@@ -225,12 +215,10 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
                 zero,
                 CombinationOptionCommon::OneLinerAdd.into(),
             )?;
-            bytes_assigned.extend_from_slice(&assigned[..4]);
+            bytes_assigned.extend_from_slice(&assigned[..byte_len - index]);
         }
 
-        Ok(bytes_assigned
-            .try_into()
-            .expect("bytes_assigned has unexpected size"))
+        Ok(bytes_assigned)
     }
 
     fn load_byte_range_table(&self, layouter: &mut impl Layouter<F>) -> Result<(), Error> {
@@ -249,5 +237,156 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
             },
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use halo2wrong::RegionCtx;
+
+    use super::*;
+    use crate::halo2::arithmetic::FieldExt;
+    use crate::halo2::circuit::{Layouter, SimpleFloorPlanner};
+    use crate::halo2::dev::MockProver;
+    use crate::halo2::plonk::{Circuit, ConstraintSystem, Error};
+    use crate::main_gate::MainGate;
+    use crate::{MainGateInstructions, UnassignedValue};
+
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "kzg")] {
+            use crate::halo2::pairing::bn256::Fr as Fp;
+        } else {
+            use crate::halo2::pasta::Fp;
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestCircuitConfig {
+        main_gate_config: MainGateConfig,
+        to_bytes_config: ToBytesConfig,
+    }
+
+    impl TestCircuitConfig {
+        fn new<F: FieldExt>(meta: &mut ConstraintSystem<F>) -> Self {
+            let main_gate_config = MainGate::<F>::configure(meta);
+            let to_bytes_config = ToBytesChip::<F>::configure(meta, &main_gate_config);
+            Self {
+                main_gate_config,
+                to_bytes_config,
+            }
+        }
+
+        fn main_gate<F: FieldExt>(&self) -> MainGate<F> {
+            MainGate::<F>::new(self.main_gate_config.clone())
+        }
+
+        fn to_bytes_chip<F: FieldExt>(&self) -> ToBytesChip<F> {
+            ToBytesChip::<F>::new(self.to_bytes_config.clone())
+        }
+    }
+
+    #[derive(Default, Clone, Debug)]
+    struct TestCircuit<F: FieldExt> {
+        input: Vec<(usize, Option<F>)>,
+    }
+
+    impl<F: FieldExt> Circuit<F> for TestCircuit<F> {
+        type Config = TestCircuitConfig;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
+            TestCircuitConfig::new(meta)
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<F>,
+        ) -> Result<(), Error> {
+            let to_bytes_chip = config.to_bytes_chip();
+            let main_gate = config.main_gate();
+
+            layouter.assign_region(
+                || "region 0",
+                |mut region| {
+                    let offset = &mut 0;
+                    let ctx = &mut RegionCtx::new(&mut region, offset);
+
+                    for value in self.input.iter() {
+                        let byte_len = value.0;
+                        let value = value.1;
+
+                        let value_bytes = value.map(|v| v.to_repr().as_ref().to_vec());
+
+                        let v = main_gate.assign_value(ctx, &UnassignedValue(value))?;
+                        let bytes_1 = to_bytes_chip.to_bytes(ctx, &v, byte_len)?;
+
+                        let bytes_0: Vec<AssignedValue<F>> = (0..byte_len)
+                            .map(|i| {
+                                main_gate.assign_value(
+                                    ctx,
+                                    &UnassignedValue(
+                                        value_bytes.as_ref().map(|bytes| F::from(bytes[i] as u64)),
+                                    ),
+                                )
+                            })
+                            .collect::<Result<_, _>>()?;
+                        for i in 0..byte_len {
+                            main_gate.assert_equal(ctx, &bytes_0[i], &bytes_1[i])?;
+                        }
+                    }
+
+                    Ok(())
+                },
+            )?;
+
+            to_bytes_chip.load_byte_range_table(&mut layouter)?;
+
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_to_bytes_circuit() {
+        let min_byte_len = 1;
+        let max_byte_len = 31;
+
+        let k: u32 = 12;
+
+        // TODO
+        let input = (min_byte_len..=max_byte_len)
+            .map(|i| {
+                let byte_len = i as usize;
+                let value = Some(Fp::from_u128((1 << i) - 1));
+                (bit_len, value)
+            })
+            .collect();
+
+        let circuit = TestCircuit::<Fp> { input };
+
+        let public_inputs = vec![vec![]];
+        let prover = match MockProver::run(k, &circuit, public_inputs) {
+            Ok(prover) => prover,
+            Err(e) => panic!("{:#?}", e),
+        };
+        assert_eq!(prover.verify(), Ok(()));
+
+        // // negative paths
+        // for bit_len in min_bit_len..(max_bit_len + 1) {
+        //     let input = vec![(bit_len, Some(Fp::from_u128(1 << bit_len)))];
+
+        //     let circuit = TestCircuit::<Fp> { input };
+
+        //     let prover = match MockProver::run(k, &circuit, vec![]) {
+        //         Ok(prover) => prover,
+        //         Err(e) => panic!("{:#?}", e),
+        //     };
+        //     assert_ne!(prover.verify(), Ok(()));
+        // }
     }
 }
