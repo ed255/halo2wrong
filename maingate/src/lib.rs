@@ -11,6 +11,7 @@ use std::marker::PhantomData;
 mod instructions;
 mod main_gate;
 mod range;
+mod to_bytes;
 
 pub use halo2wrong::{halo2, utils::*, RegionCtx};
 pub use instructions::{CombinationOptionCommon, MainGateInstructions, Term};
