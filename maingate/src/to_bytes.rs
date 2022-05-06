@@ -1,6 +1,12 @@
-//! TODO
+//! `ToBytesChip` decomposes an input `AssignedValue` into `byte_len` byte
+//! values and checks that those values correspond to the little endian
+//! representation of the input value by:
+//! - Verifying that each value is in the byte range.
+//! - Verifying that the linear combination of all the bytes in base 256 is
+//!   equal to the input
+//! value.
 
-use super::main_gate::{MainGate, MainGateColumn, MainGateConfig};
+use super::main_gate::{MainGate, MainGateConfig};
 use crate::halo2::arithmetic::FieldExt;
 use crate::halo2::circuit::Chip;
 use crate::halo2::circuit::Layouter;
@@ -8,15 +14,20 @@ use crate::halo2::plonk::{ConstraintSystem, Error};
 use crate::halo2::plonk::{Selector, TableColumn};
 use crate::halo2::poly::Rotation;
 use crate::instructions::{CombinationOptionCommon, MainGateInstructions, Term};
-use crate::{AssignedValue, UnassignedValue};
+use crate::AssignedValue;
 use halo2wrong::RegionCtx;
-use std::cmp;
 use std::marker::PhantomData;
 
 #[derive(Clone, Debug)]
 pub struct ToBytesConfig {
     main_gate_config: MainGateConfig,
-    s_dense_limb_range: Selector,
+    /// Selector to enable byte range check in columns a, b, c.  Enabled in all
+    /// rows.
+    s_abc_byte_range: Selector,
+    /// Selector to enable byte range check in column d.  Enabled in all rows
+    /// except for the last one, where column d contains the input value.
+    s_d_byte_range: Selector,
+    /// Table that contains the byte range: [0..255]
     byte_range_table: TableColumn,
 }
 
@@ -37,7 +48,44 @@ impl<F: FieldExt> ToBytesChip<F> {
         meta: &mut ConstraintSystem<F>,
         main_gate_config: &MainGateConfig,
     ) -> ToBytesConfig {
-        todo!();
+        let (a, b, c, d) = (
+            main_gate_config.a,
+            main_gate_config.b,
+            main_gate_config.c,
+            main_gate_config.d,
+        );
+        let byte_range_table = meta.lookup_table_column();
+        let s_abc_byte_range = meta.complex_selector();
+        let s_d_byte_range = meta.complex_selector();
+
+        macro_rules! meta_lookup {
+            ($column:expr, $selector:expr, $table:expr) => {
+                #[cfg(not(feature = "kzg"))]
+                meta.lookup(|meta| {
+                    let exp = meta.query_advice($column, Rotation::cur());
+                    let s = meta.query_selector($selector);
+                    vec![(exp * s, $table)]
+                });
+                #[cfg(feature = "kzg")]
+                meta.lookup(stringify!($column), |meta| {
+                    let exp = meta.query_advice($column, Rotation::cur());
+                    let s = meta.query_selector($selector);
+                    vec![(exp * s, $table)]
+                });
+            };
+        }
+
+        meta_lookup!(a, s_abc_byte_range, byte_range_table);
+        meta_lookup!(b, s_abc_byte_range, byte_range_table);
+        meta_lookup!(c, s_abc_byte_range, byte_range_table);
+        meta_lookup!(d, s_d_byte_range, byte_range_table);
+
+        ToBytesConfig {
+            main_gate_config: main_gate_config.clone(),
+            s_abc_byte_range,
+            s_d_byte_range,
+            byte_range_table,
+        }
     }
 
     fn base(byte_len: usize) -> Vec<F> {
@@ -120,37 +168,23 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
 
         let mut bytes_assigned = Vec::new();
 
-        // A. When byte_len is between 1 and 3
-        //
-        // in = B^0 * b0 + B^1 * b1 + B^2 * b2
-        //
-        // | A        | B        | C        | D       | E        | E_next |
-        // | ---      | ---      | ---      | ---     | ---      | ---    |
-        // | B^0 * b0 | B^1 * b1 | B^2 * b2 | -1 * in | -        | -      |
-
-        // B. When byte_len is between 4 and 31
-        //
-        // acc0 = B^0 * b0 + B^1 * b1 + B^2 * b2 + B^3 * b3        (First row)
-        // acc1 = B^4 * b4 + B^5 * b5 + B^6 * b6 + B^7 * b7 + acc0 (Intermediate row)
-        // in   = B^8 * b8 + B^9 * b9 + B^10 * b10 + acc1          (Last row)
-        //
-        // | A        | B        | C          | D        | E        | E_next    |
-        // | ---      | ---      | ---        | ---      | ---      | ---       |
-        // | B^0 * b0 | B^1 * b1 | B^2 * b2   | B^3 * b3 | -        | -1 * acc0 |
-        // | B^4 * b4 | B^5 * b5 | B^6 * b6   | B^7 * b7 | 1 * acc0 | -1 * acc1 |
-        // | B^8 * b8 | B^9 * b9 | B^10 * b10 | -1 * in  | 1 * acc1 | -         |
-
         let byte_terms: Vec<Term<F>> = (0..byte_len)
             .map(|i| Term::Unassigned(bytes.as_ref().map(|bytes| bytes[i]), base[i]))
             .collect();
         if byte_terms.len() <= 3 {
-            // A. Single row case
-
+            // A. Single row case.  When byte_len is between 1 and 3
+            //
             // in = B^0 * b0 + B^1 * b1 + B^2 * b2
-            let term_0 = byte_terms[0].clone();
+            //
+            // | A        | B        | C        | D       | E        | E_next |
+            // | ---      | ---      | ---      | ---     | ---      | ---    |
+            // | B^0 * b0 | B^1 * b1 | B^2 * b2 | -1 * in | -        | -      |
+
+            let term_0 = byte_terms.get(0).cloned().unwrap_or(Term::Zero);
             let term_1 = byte_terms.get(1).cloned().unwrap_or(Term::Zero);
             let term_2 = byte_terms.get(2).cloned().unwrap_or(Term::Zero);
             let term_3 = Term::Assigned(*input, -F::one());
+            ctx.enable(self.config.s_abc_byte_range)?;
             let assigned = main_gate.combine(
                 ctx,
                 &[term_0, term_1, term_2, term_3, Term::Zero],
@@ -159,11 +193,24 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
             )?;
             bytes_assigned.extend_from_slice(&assigned[..byte_len]);
         } else {
-            // B. Multiple row case
+            // B. Multiple row case.  When byte_len is between 4 and 31
+            //
+            // acc0 = B^0 * b0 + B^1 * b1 + B^2 * b2 + B^3 * b3        (First row)
+            // acc1 = B^4 * b4 + B^5 * b5 + B^6 * b6 + B^7 * b7 + acc0 (Intermediate row)
+            // in   = B^8 * b8 + B^9 * b9 + B^10 * b10 + acc1          (Last row)
+            //
+            // | A        | B        | C          | D        | E        | E_next    |
+            // | ---      | ---      | ---        | ---      | ---      | ---       |
+            // | B^0 * b0 | B^1 * b1 | B^2 * b2   | B^3 * b3 | -        | -1 * acc0 |
+            // | B^4 * b4 | B^5 * b5 | B^6 * b6   | B^7 * b7 | 1 * acc0 | -1 * acc1 |
+            // | B^8 * b8 | B^9 * b9 | B^10 * b10 | -1 * in  | 1 * acc1 | -         |
+
             let mut index = 0;
 
             // First row
             // acc0 = B^0 * b0 + B^1 * b1 + B^2 * b2 + B^3 * b3
+            ctx.enable(self.config.s_abc_byte_range)?;
+            ctx.enable(self.config.s_d_byte_range)?;
             let assigned = main_gate.combine(
                 ctx,
                 &[
@@ -183,7 +230,9 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
 
             // Intermediate rows
             // acc1 = B^4 * b4 + B^5 * b5 + B^6 * b6 + B^7 * b7 + acc0
-            while index + 3 <= byte_len {
+            while index + 3 < byte_len {
+                ctx.enable(self.config.s_abc_byte_range)?;
+                ctx.enable(self.config.s_d_byte_range)?;
                 let assigned = main_gate.combine(
                     ctx,
                     &[
@@ -203,12 +252,13 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
 
             // Last row
             // in   = B^8 * b8 + B^9 * b9 + B^10 * b10 + acc1
-            let term_0 = byte_terms[index + 0].clone();
+            let term_0 = byte_terms.get(index + 0).cloned().unwrap_or(Term::Zero);
             let term_1 = byte_terms.get(index + 1).cloned().unwrap_or(Term::Zero);
             let term_2 = byte_terms.get(index + 2).cloned().unwrap_or(Term::Zero);
             let term_3 = Term::Assigned(*input, -F::one());
             let term_4 = Term::Unassigned(acc, F::one());
 
+            ctx.enable(self.config.s_abc_byte_range)?;
             let assigned = main_gate.combine(
                 ctx,
                 &[term_0, term_1, term_2, term_3, term_4],
@@ -252,6 +302,9 @@ mod tests {
     use crate::halo2::plonk::{Circuit, ConstraintSystem, Error};
     use crate::main_gate::MainGate;
     use crate::{MainGateInstructions, UnassignedValue};
+    use rand::SeedableRng;
+    use rand_core::RngCore;
+    use rand_xorshift::XorShiftRng;
 
     cfg_if::cfg_if! {
         if #[cfg(feature = "kzg")] {
@@ -322,10 +375,6 @@ mod tests {
                         let value = value.1;
 
                         let value_bytes = value.map(|v| v.to_repr().as_ref().to_vec());
-
-                        let v = main_gate.assign_value(ctx, &UnassignedValue(value))?;
-                        let bytes_1 = to_bytes_chip.to_bytes(ctx, &v, byte_len)?;
-
                         let bytes_0: Vec<AssignedValue<F>> = (0..byte_len)
                             .map(|i| {
                                 main_gate.assign_value(
@@ -336,6 +385,10 @@ mod tests {
                                 )
                             })
                             .collect::<Result<_, _>>()?;
+
+                        let v = main_gate.assign_value(ctx, &UnassignedValue(value))?;
+                        let bytes_1 = to_bytes_chip.to_bytes(ctx, &v, byte_len)?;
+
                         for i in 0..byte_len {
                             main_gate.assert_equal(ctx, &bytes_0[i], &bytes_1[i])?;
                         }
@@ -351,19 +404,29 @@ mod tests {
         }
     }
 
+    fn rand_f<F: FieldExt>(rng: impl RngCore, byte_len: usize) -> F {
+        let v = F::random(rng);
+        let mut v_repr = v.to_repr();
+        let v_bytes = v_repr.as_mut();
+        for b in v_bytes[byte_len..].iter_mut() {
+            *b = 0
+        }
+        F::from_repr(v_repr).unwrap()
+    }
+
     #[test]
     fn test_to_bytes_circuit() {
         let min_byte_len = 1;
         let max_byte_len = 31;
 
         let k: u32 = 12;
+        let mut rng = XorShiftRng::seed_from_u64(1);
 
-        // TODO
         let input = (min_byte_len..=max_byte_len)
             .map(|i| {
                 let byte_len = i as usize;
-                let value = Some(Fp::from_u128((1 << i) - 1));
-                (bit_len, value)
+                let value = rand_f(&mut rng, byte_len);
+                (byte_len, Some(value))
             })
             .collect();
 
@@ -375,18 +438,5 @@ mod tests {
             Err(e) => panic!("{:#?}", e),
         };
         assert_eq!(prover.verify(), Ok(()));
-
-        // // negative paths
-        // for bit_len in min_bit_len..(max_bit_len + 1) {
-        //     let input = vec![(bit_len, Some(Fp::from_u128(1 << bit_len)))];
-
-        //     let circuit = TestCircuit::<Fp> { input };
-
-        //     let prover = match MockProver::run(k, &circuit, vec![]) {
-        //         Ok(prover) => prover,
-        //         Err(e) => panic!("{:#?}", e),
-        //     };
-        //     assert_ne!(prover.verify(), Ok(()));
-        // }
     }
 }
