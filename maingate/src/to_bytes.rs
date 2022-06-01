@@ -148,6 +148,7 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
     ) -> Result<Vec<AssignedValue<F>>, Error> {
         let main_gate = self.main_gate();
         let (one, zero) = (F::one(), F::zero());
+        // base panics if byte_len == 0 OR bytelen >= 32
         let base = Self::base(byte_len);
 
         let bytes: Option<Vec<F>> = input
@@ -171,29 +172,30 @@ impl<F: FieldExt> ToBytesInstructions<F> for ToBytesChip<F> {
         let byte_terms: Vec<Term<F>> = (0..byte_len)
             .map(|i| Term::Unassigned(bytes.as_ref().map(|bytes| bytes[i]), base[i]))
             .collect();
-        if byte_terms.len() <= 3 {
-            // A. Single row case.  When byte_len is between 1 and 3
+        if byte_terms.len() <= 4 {
+            // A. Single row case.  When byte_len is between 1 and 4
             //
-            // in = B^0 * b0 + B^1 * b1 + B^2 * b2
+            // in = B^0 * b0 + B^1 * b1 + B^2 * b2 + B^3 * b3
             //
-            // | A        | B        | C        | D       | E        | E_next |
-            // | ---      | ---      | ---      | ---     | ---      | ---    |
-            // | B^0 * b0 | B^1 * b1 | B^2 * b2 | -1 * in | -        | -      |
+            // | A        | B        | C        | D        | E        | E_next |
+            // | ---      | ---      | ---      | ---      | ---      | ---    |
+            // | B^0 * b0 | B^1 * b1 | B^2 * b2 | B^3 * b3 | -1 * in  | -      |
 
             let term_0 = byte_terms.get(0).cloned().unwrap_or(Term::Zero);
             let term_1 = byte_terms.get(1).cloned().unwrap_or(Term::Zero);
             let term_2 = byte_terms.get(2).cloned().unwrap_or(Term::Zero);
-            let term_3 = Term::Assigned(*input, -F::one());
+            let term_3 = byte_terms.get(3).cloned().unwrap_or(Term::Zero);
+            let term_4 = Term::Assigned(*input, -F::one());
             ctx.enable(self.config.s_abc_byte_range)?;
             let assigned = main_gate.combine(
                 ctx,
-                &[term_0, term_1, term_2, term_3, Term::Zero],
+                &[term_0, term_1, term_2, term_3, term_4],
                 zero,
                 CombinationOptionCommon::OneLinerAdd.into(),
             )?;
             bytes_assigned.extend_from_slice(&assigned[..byte_len]);
         } else {
-            // B. Multiple row case.  When byte_len is between 4 and 31
+            // B. Multiple row case.  When byte_len is between 5 and 31
             //
             // acc0 = B^0 * b0 + B^1 * b1 + B^2 * b2 + B^3 * b3        (First row)
             // acc1 = B^4 * b4 + B^5 * b5 + B^6 * b6 + B^7 * b7 + acc0 (Intermediate row)
