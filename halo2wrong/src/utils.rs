@@ -120,7 +120,7 @@ impl DimensionMeasurement {
 
     pub fn measure<F: FieldExt, C: Circuit<F>>(circuit: &C) -> Result<Dimension, Error> {
         let mut cs = ConstraintSystem::default();
-        let config = C::configure(&mut cs);
+        let config = circuit.configure(&mut cs);
         let mut measurement = Self::default();
         C::FloorPlanner::synthesize(&mut measurement, circuit, config, cs.constants().to_vec())?;
         Ok(Dimension {
